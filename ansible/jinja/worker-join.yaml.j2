@@ -1,0 +1,13 @@
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: {{ join_token.stdout_lines[0] }}
+    apiServerEndpoint: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}:6443"
+    caCertHashes:
+      - "sha256:{{ token_sha.stdout_lines[0] }}"
+nodeRegistration:
+  name: {% raw %}{{ worker_hostname.stdout_lines[0] }}{% endraw %}{{''}}
+  kubeletExtraArgs:
+    cloud-provider: aws

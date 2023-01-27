@@ -1,0 +1,207 @@
+---
+# Master node config in self-managed cluster
+-
+  hosts: all
+  become: true
+  vars_files:
+    - ./vault.yaml
+  tasks:
+    - name: Update and Upgrade
+      apt:
+        upgrade: safe
+        update_cache: true
+
+    - name: Install cluster modules prerequisites
+      apt:
+        name: "{{ item }}"
+        update_cache: true
+      loop: "{{ cluster_modules }}"
+
+    - name: Download and install containerd
+      unarchive:
+        src: "https://github.com/containerd/containerd/releases/download/v1.6.15/containerd-1.6.15-linux-amd64.tar.gz"
+        dest: "/usr/local/"
+        mode: 0755
+        remote_src: true
+    
+    - name: Create directory if not exists for containerd.service
+      file:
+        path: "/usr/local/lib/systemd/system"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Download containerd.service file
+      get_url:
+        url: "https://raw.githubusercontent.com/containerd/containerd/main/containerd.service"
+        dest: "/usr/local/lib/systemd/system/containerd.service"
+        mode: 0755
+
+    - name: Reread systemd daemon configs
+      systemd:
+        daemon_reload: true
+
+    - name: Create directory sbin/runc if not exists
+      file:
+        path: "/usr/local/sbin"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Download runc
+      get_url:
+        url: "https://github.com/opencontainers/runc/releases/download/v1.1.4/runc.amd64"
+        dest: "/usr/local/sbin/runc"
+        mode: 0755
+
+    - name: Create directory /opt/cni/bin if not exists
+      file:
+        path: "/opt/cni/bin"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Download and install cni plugins
+      unarchive:
+        src: "https://github.com/containernetworking/plugins/releases/download/v1.1.1/cni-plugins-linux-amd64-v1.1.1.tgz"
+        dest: "/opt/cni/bin/"
+        mode: 0755
+        remote_src: true
+
+    - name: Create directory /etc/containerd if not exists
+      file:
+        path: "/etc/containerd"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Create default config.toml
+      shell: containerd config default > /etc/containerd/config.toml
+
+    - name: Replace a string in config.toml
+      lineinfile:
+        path: "/etc/containerd/config.toml"
+        search_string: 'SystemdCgroup = false'
+        line: SystemdCgroup = true
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Enable service containerd and start it
+      systemd:
+        name: containerd
+        enabled: true
+        state: started
+
+    - name: Create directory /etc/apt/keyrings/ if not exists
+      file:
+        path: "/etc/apt/keyrings"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Download kubernetes-archive-keyring.gpg
+      get_url:
+        url: "https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+        dest: "/etc/apt/keyrings/kubernetes-archive-keyring.gpg"
+        mode: 0755
+
+    - name: Add mirror for kubernetes
+      copy:
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main"
+        dest: "/etc/apt/sources.list.d/kubernetes.list"
+
+    - name: Apt Update
+      apt:
+        update_cache: true
+        cache_valid_time: 86400
+
+    - name: Install kube modules
+      apt:
+        name: "{{ item }}"
+        update_cache: true
+      loop: "{{ kube_modules }}"
+
+    - name: Add module for autoenable on boot
+      lineinfile:
+        path: "/etc/modules"
+        line: br_netfilter
+        insertafter: EOF
+
+    - name: Enable br_netfilter module
+      community.general.modprobe:
+        name: br_netfilter
+
+    - name: Enable ipv4 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Change terget hostname
+      shell: hostnamectl set-hostname $(curl -s http://169.254.169.254/latest/meta-data/local-hostname)
+
+    - name: Clone repo
+      become: true
+      become_user: ubuntu
+      git:
+        repo: "https://github.com/duoxide/k8s-complex.git"
+        dest: "/home/ubuntu/k8s-complex"
+        clone: true
+        update: true
+
+    - name: Launching kubeadm init
+      shell: kubeadm init --config=/home/ubuntu/k8s-complex/kubeinit.yaml
+#      register: result
+
+    - name: Configure kubectl
+      shell: |
+        mkdir -p ./.kube
+        cp -i /etc/kubernetes/admin.conf ./.kube/config
+        chown -R "{{ ansible_env.SUDO_USER }}":"{{ ansible_env.SUDO_USER }}" ./.kube/config
+      args:
+        chdir: "{{ ansible_env.PWD }}"
+
+    - name: Register Token
+      shell: "echo $(kubeadm token list | awk '{print $1}' | sed -n '2 p')"
+      register: join_token
+
+    - name: Register Token-SHA
+      shell: "echo $(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //')"
+      register: token_sha
+
+    - name: Create partly complete Join YAML
+      delegate_to: localhost
+      become: true
+      become_user: alex
+      template:
+        src: "./jinja/worker-join.yaml.j2"
+        dest: "./jinja/worker-join2.yaml.j2"
+
+    - name: Launching Flannel
+      become: true
+      become_user: ubuntu
+      shell: kubectl apply -f /home/ubuntu/k8s-complex/kube-flannel.yaml
+
+#    - name: Save output to file
+#      delegate_to: localhost
+#      become: true
+#      become_user: alex
+#      copy:
+#        content: "{{ result.stdout_lines|join('\n') }}"
+#        dest: ./debug
+
+#    - name: Output of kubeadm init
+#      debug:
+#        msg: "{{ result.stdout }}"
+
+      
+
+...

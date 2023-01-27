@@ -1,0 +1,14 @@
+---
+
+-
+  hosts: all
+  become: true
+  tasks:
+#    - name: bla
+#      become_user: ubuntu
+#      shell: "echo $HOME"
+#      register: meh
+
+    - name: test
+      debug:
+        msg: "{{ ansible_env.SUDO_USER }}"

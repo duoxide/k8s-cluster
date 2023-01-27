@@ -1,0 +1,3 @@
+cluster_modules: [ 'tar', 'unzip', 'zstd', 'apt-transport-https', 'ca-certificates', 'curl' ]
+
+kube_modules: [ 'kubelet', 'kubeadm', 'kubectl' ]
